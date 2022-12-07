@@ -1,0 +1,12 @@
+{
+    "nrf-connect.applications": [
+        "${workspaceFolder}",
+        "/home/madman/develop/lte/gnss"
+    ],
+    "nrf-connect.topdir": "${nrf-connect.sdk:2.1.2}",
+    "nrf-connect.toolchain.path": "${nrf-connect.toolchain:2.1.2}",
+    "files.associations": {
+        "socket.h": "c",
+        "date_time.h": "c"
+    }
+}

@@ -22,6 +22,14 @@ config GNSS_SAMPLE_MODE_TTFF_TEST
 
 endchoice
 
+config UDP_SERVER_ADDRESS_STATIC
+	string "UDP server IP address"
+	default "1.220.158.92"
+
+config UDP_SERVER_PORT
+	int "UDP server port number"
+	default "45555"
+
 if GNSS_SAMPLE_MODE_PERIODIC
 
 config GNSS_SAMPLE_PERIODIC_INTERVAL

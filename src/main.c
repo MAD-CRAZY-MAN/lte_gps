@@ -14,11 +14,15 @@
 #include <nrf_modem_gnss.h>
 #include <modem/lte_lc.h>
 #include <date_time.h>
+#include <zephyr/net/socket.h>
 
 LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
 
 #define PI 3.14159265358979323846
 #define EARTH_RADIUS_METERS (6371.0 * 1000.0)
+
+static int client_fd;
+static struct sockaddr_storage host_addr;
 
 static const char update_indicator[] = {'\\', '|', '/', '-'};
 
@@ -77,6 +81,57 @@ static double distance_calculate(double lat1, double lon1,
 	double c = 2 * asin(sqrt(a));
 
 	return EARTH_RADIUS_METERS * c;
+}
+
+K_SEM_DEFINE(lte_ready, 0, 1);
+
+static void lte_lc_event_handler(const struct lte_lc_evt *const evt)
+{
+	switch (evt->type) {
+	case LTE_LC_EVT_NW_REG_STATUS:
+		if ((evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME) ||
+		    (evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING)) {
+			LOG_INF("Connected to LTE network");
+			k_sem_give(&lte_ready);
+		}
+		break;
+
+	default:
+		break;
+	}
+}
+
+bool lte_connect(void)
+{
+	int err;
+
+	LOG_INF("Connecting to LTE network");
+
+	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
+	if (err) {
+		LOG_ERR("Failed to activate LTE, error: %d\n", err);
+		return false;
+	}
+
+	k_sem_take(&lte_ready, K_FOREVER);
+
+	// /* Wait for a while, because with IPv4v6 PDN the IPv6 activation takes a bit more time. */
+	//k_sleep(K_SECONDS(1));
+
+	return true;
+}
+
+void lte_disconnect(void)
+{
+	int err;
+
+	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+	if (err) {
+		LOG_ERR("Failed to deactivate LTE, error: %d", err);
+		return;
+	}
+
+	LOG_INF("LTE disconnected");
 }
 
 static void print_distance_from_reference(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
@@ -150,6 +205,8 @@ static int modem_init(void)
 		LOG_ERR("Failed to initialize LTE link controller");
 		return -1;
 	}
+
+	lte_lc_register_handler(lte_lc_event_handler);
 
 	return 0;
 }
@@ -225,7 +282,7 @@ static int gnss_init_and_start(void)
 
 	/* Default to continuous tracking. */
 	uint16_t fix_retry = 0;
-	uint16_t fix_interval = 1;
+	uint16_t fix_interval = 15;
 
 	if (nrf_modem_gnss_fix_retry_set(fix_retry) != 0) {
 		LOG_ERR("Failed to set GNSS fix retry");
@@ -277,8 +334,67 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 	printf("Tracking: %2d Using: %2d Unhealthy: %d\n", tracked, in_fix, unhealthy);
 }
 
+
+static void server_disconnect(void)
+{
+	(void)close(client_fd);
+}
+
+static int server_init(void)
+{
+	struct sockaddr_in *server4 = ((struct sockaddr_in *)&host_addr);
+
+	server4->sin_family = AF_INET;
+	server4->sin_port = htons(CONFIG_UDP_SERVER_PORT);
+
+	inet_pton(AF_INET, CONFIG_UDP_SERVER_ADDRESS_STATIC,
+		  &server4->sin_addr);
+
+	return 0;
+}
+
+static int server_connect(void)
+{
+	int err;
+
+	client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (client_fd < 0) {
+		printk("Failed to create UDP socket: %d\n", errno);
+		err = -errno;
+		goto error;
+	}
+
+	err = connect(client_fd, (struct sockaddr *)&host_addr,
+		      sizeof(struct sockaddr_in));
+	if (err < 0) {
+		printk("Connect failed : %d\n", errno);
+		goto error;
+	}
+
+	return 0;
+
+error:
+	server_disconnect();
+
+	return err;
+}
+
+
 static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
+	int err;
+	char buffer[32];
+	struct tm time = {0};
+	time.tm_year = pvt_data->datetime.year-1900;
+	time.tm_mon = pvt_data->datetime.month-1;
+	time.tm_mday = pvt_data->datetime.day;
+	time.tm_hour = pvt_data->datetime.hour;
+	time.tm_min = pvt_data->datetime.minute;
+	time.tm_sec = pvt_data->datetime.seconds;
+	int utc = mktime(&time);
+	
+	snprintf(buffer, sizeof(buffer), "%d,%lf,%lf", utc, pvt_data->latitude, pvt_data->longitude);
+
 	printf("Latitude:       %.06f\n", pvt_data->latitude);
 	printf("Longitude:      %.06f\n", pvt_data->longitude);
 	printf("Altitude:       %.01f m\n", pvt_data->altitude);
@@ -299,11 +415,35 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	printf("HDOP:           %.01f\n", pvt_data->hdop);
 	printf("VDOP:           %.01f\n", pvt_data->vdop);
 	printf("TDOP:           %.01f\n", pvt_data->tdop);
+
+	if(lte_connect()){
+		err = server_init();
+		if (err) {
+			printk("Not able to initialize UDP server connection\n");
+			return;
+		}
+		
+		err = server_connect();
+		if (err) {
+			printk("Not able to connect to UDP server\n");
+			return;
+		}
+		printk("before send");
+		err = send(client_fd, buffer, sizeof(buffer), 0);
+		if (err < 0) {
+			printk("Failed to transmit UDP packet, %d\n", errno);
+			return;
+		}
+
+		server_disconnect();
+		lte_disconnect();
+	}
 }
 
 int main(void)
 {
 	uint8_t cnt = 0;
+	int err;
 	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
 
 	LOG_INF("Starting GNSS sample");
