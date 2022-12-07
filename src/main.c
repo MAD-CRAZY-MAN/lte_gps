@@ -282,7 +282,7 @@ static int gnss_init_and_start(void)
 
 	/* Default to continuous tracking. */
 	uint16_t fix_retry = 0;
-	uint16_t fix_interval = 15;
+	uint16_t fix_interval = 0;
 
 	if (nrf_modem_gnss_fix_retry_set(fix_retry) != 0) {
 		LOG_ERR("Failed to set GNSS fix retry");
@@ -416,18 +416,25 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	printf("VDOP:           %.01f\n", pvt_data->vdop);
 	printf("TDOP:           %.01f\n", pvt_data->tdop);
 
+	if (nrf_modem_gnss_stop() != 0) {
+		LOG_ERR("Failed to stop GNSS");
+		return;
+	}
 	if(lte_connect()){
 		err = server_init();
 		if (err) {
 			printk("Not able to initialize UDP server connection\n");
 			return;
 		}
+		printk("initialize udp server\n");
 		
 		err = server_connect();
 		if (err) {
 			printk("Not able to connect to UDP server\n");
 			return;
 		}
+		printk("connected udp server\n");
+
 		printk("before send");
 		err = send(client_fd, buffer, sizeof(buffer), 0);
 		if (err < 0) {
@@ -437,6 +444,10 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 
 		server_disconnect();
 		lte_disconnect();
+	}
+	if (nrf_modem_gnss_start() != 0) {
+		LOG_ERR("Failed to start GNSS");
+		return;
 	}
 }
 
