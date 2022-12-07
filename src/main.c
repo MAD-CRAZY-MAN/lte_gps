@@ -18,9 +18,6 @@
 
 LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
 
-#define PI 3.14159265358979323846
-#define EARTH_RADIUS_METERS (6371.0 * 1000.0)
-
 static int client_fd;
 static struct sockaddr_storage host_addr;
 
@@ -29,11 +26,6 @@ static const char update_indicator[] = {'\\', '|', '/', '-'};
 static struct nrf_modem_gnss_pvt_data_frame last_pvt;
 static uint64_t fix_timestamp;
 static uint32_t time_blocked;
-
-/* Reference position. */
-static bool ref_used;
-static double ref_latitude;
-static double ref_longitude;
 
 K_MSGQ_DEFINE(nmea_queue, sizeof(struct nrf_modem_gnss_nmea_data_frame *), 10, 4);
 static K_SEM_DEFINE(pvt_data_sem, 0, 1);
@@ -54,34 +46,6 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_LTE_NETWORK_MODE_LTE_M_GPS) ||
 	     "CONFIG_LTE_NETWORK_MODE_LTE_M_GPS, "
 	     "CONFIG_LTE_NETWORK_MODE_NBIOT_GPS or "
 	     "CONFIG_LTE_NETWORK_MODE_LTE_M_NBIOT_GPS must be enabled");
-
-BUILD_ASSERT((sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) == 1 &&
-	      sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) == 1) ||
-	     (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
-	      sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) > 1),
-	     "CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE and "
-	     "CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE must be both either set or empty");
-
-/* Returns the distance between two coordinates in meters. The distance is calculated using the
- * haversine formula.
- */
-static double distance_calculate(double lat1, double lon1,
-				 double lat2, double lon2)
-{
-	double d_lat_rad = (lat2 - lat1) * PI / 180.0;
-	double d_lon_rad = (lon2 - lon1) * PI / 180.0;
-
-	double lat1_rad = lat1 * PI / 180.0;
-	double lat2_rad = lat2 * PI / 180.0;
-
-	double a = pow(sin(d_lat_rad / 2), 2) +
-		   pow(sin(d_lon_rad / 2), 2) *
-		   cos(lat1_rad) * cos(lat2_rad);
-
-	double c = 2 * asin(sqrt(a));
-
-	return EARTH_RADIUS_METERS * c;
-}
 
 K_SEM_DEFINE(lte_ready, 0, 1);
 
@@ -107,14 +71,16 @@ bool lte_connect(void)
 
 	LOG_INF("Connecting to LTE network");
 
-	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
-	if (err) {
-		LOG_ERR("Failed to activate LTE, error: %d\n", err);
-		return false;
-	}
-
-	k_sem_take(&lte_ready, K_FOREVER);
-
+	//k_sleep(K_SECONDS(1));
+	//err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
+	// if (err) {
+	// 	LOG_ERR("Failed to activate LTE, error: %d\n", err);
+	// 	return false;
+	// }
+	lte_lc_connect();
+	printk("before sem\n");
+	//k_sem_take(&lte_ready, K_FOREVER);
+	printk("after sem\n");
 	// /* Wait for a while, because with IPv4v6 PDN the IPv6 activation takes a bit more time. */
 	//k_sleep(K_SECONDS(1));
 
@@ -132,22 +98,6 @@ void lte_disconnect(void)
 	}
 
 	LOG_INF("LTE disconnected");
-}
-
-static void print_distance_from_reference(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
-{
-	if (!ref_used) {
-		return;
-	}
-
-	double distance = distance_calculate(pvt_data->latitude, pvt_data->longitude,
-					     ref_latitude, ref_longitude);
-
-	if (IS_ENABLED(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)) {
-		LOG_INF("Distance from reference: %.01f", distance);
-	} else {
-		printf("\nDistance from reference: %.01f\n", distance);
-	}
 }
 
 static void gnss_event_handler(int event)
@@ -421,6 +371,7 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 		return;
 	}
 	if(lte_connect()){
+		printk("start server init\n");
 		err = server_init();
 		if (err) {
 			printk("Not able to initialize UDP server connection\n");
@@ -459,14 +410,6 @@ int main(void)
 
 	LOG_INF("Starting GNSS sample");
 
-	/* Initialize reference coordinates (if used). */
-	if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
-	    sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) > 1) {
-		ref_used = true;
-		ref_latitude = atof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE);
-		ref_longitude = atof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE);
-	}
-
 	if (modem_init() != 0) {
 		LOG_ERR("Failed to initialize modem");
 		return -1;
@@ -485,53 +428,39 @@ int main(void)
 		if (events[0].state == K_POLL_STATE_SEM_AVAILABLE &&
 		    k_sem_take(events[0].sem, K_NO_WAIT) == 0) {
 			/* New PVT data available */
-
-			if (IS_ENABLED(CONFIG_GNSS_SAMPLE_NMEA_ONLY)) {
-				/* NMEA-only output mode. */
-
-				if (output_paused()) {
-					goto handle_nmea;
-				}
-
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-					print_distance_from_reference(&last_pvt);
-				}
-			} else {
-				/* PVT and NMEA output mode. */
-
-				if (output_paused()) {
-					goto handle_nmea;
-				}
-
-				printf("\033[1;1H");
-				printf("\033[2J");
-				print_satellite_stats(&last_pvt);
-
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-					printf("GNSS operation blocked by LTE\n");
-				}
-				if (last_pvt.flags &
-				    NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
-					printf("Insufficient GNSS time windows\n");
-				}
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT) {
-					printf("Sleep period(s) between PVT notifications\n");
-				}
-				printf("-----------------------------------\n");
-
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-					fix_timestamp = k_uptime_get();
-					print_fix_data(&last_pvt);
-					print_distance_from_reference(&last_pvt);
-				} else {
-					printf("Seconds since last fix: %d\n",
-					       (uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
-					cnt++;
-					printf("Searching [%c]\n", update_indicator[cnt%4]);
-				}
-
-				printf("\nNMEA strings:\n\n");
+			
+			/* PVT and NMEA output mode. */
+			if (output_paused()) {
+				goto handle_nmea;
 			}
+
+			printf("\033[1;1H");
+			printf("\033[2J");
+			print_satellite_stats(&last_pvt);
+
+			if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
+				printf("GNSS operation blocked by LTE\n");
+			}
+			if (last_pvt.flags &
+				NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
+				printf("Insufficient GNSS time windows\n");
+			}
+			if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT) {
+				printf("Sleep period(s) between PVT notifications\n");
+			}
+			printf("-----------------------------------\n");
+
+			if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+				fix_timestamp = k_uptime_get();
+				print_fix_data(&last_pvt);
+			} else {
+				printf("Seconds since last fix: %d\n",
+						(uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
+				cnt++;
+				printf("Searching [%c]\n", update_indicator[cnt%4]);
+			}
+
+			printf("\nNMEA strings:\n\n");
 		}
 
 handle_nmea:
