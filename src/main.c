@@ -53,13 +53,36 @@ static void lte_lc_event_handler(const struct lte_lc_evt *const evt)
 {
 	switch (evt->type) {
 	case LTE_LC_EVT_NW_REG_STATUS:
-		if ((evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME) ||
-		    (evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING)) {
-			LOG_INF("Connected to LTE network");
+		if (evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME) {
+			LOG_INF("Connected to LTE network (HOME)");
+			k_sem_give(&lte_ready);
+		}
+		if((evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING)){
+			LOG_INF("Connected to LTE network (ROAMING)");
 			k_sem_give(&lte_ready);
 		}
 		break;
+	case LTE_LC_EVT_PSM_UPDATE:
+		printk("PSM parameter update: TAU: %d, Active time: %d\n",
+			evt->psm_cfg.tau, evt->psm_cfg.active_time);
+		break;
+	case LTE_LC_EVT_EDRX_UPDATE: {
+		char log_buf[60];	
+		ssize_t len;
 
+		len = snprintf(log_buf, sizeof(log_buf),
+			       "eDRX parameter update: eDRX: %f, PTW: %f\n",
+			       evt->edrx_cfg.edrx, evt->edrx_cfg.ptw);
+		if (len > 0) {
+			printk("%s\n", log_buf);
+		}
+		break;
+	}
+	case LTE_LC_EVT_RRC_UPDATE:
+		printk("RRC mode: %s\n",
+			evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ?
+			"Connected" : "Idle\n");
+		break;
 	default:
 		break;
 	}
@@ -71,15 +94,13 @@ bool lte_connect(void)
 
 	LOG_INF("Connecting to LTE network");
 
-	//k_sleep(K_SECONDS(1));
-	//err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
-	// if (err) {
-	// 	LOG_ERR("Failed to activate LTE, error: %d\n", err);
-	// 	return false;
-	// }
-	lte_lc_connect();
+	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
+	if (err) {
+		LOG_ERR("Failed to activate LTE, error: %d\n", err);
+		return false;
+	}
 	printk("before sem\n");
-	//k_sem_take(&lte_ready, K_FOREVER);
+	k_sem_take(&lte_ready, K_FOREVER);
 	printk("after sem\n");
 	// /* Wait for a while, because with IPv4v6 PDN the IPv6 activation takes a bit more time. */
 	//k_sleep(K_SECONDS(1));
@@ -155,9 +176,17 @@ static int modem_init(void)
 		LOG_ERR("Failed to initialize LTE link controller");
 		return -1;
 	}
-
+	int err = lte_lc_psm_req(true); //nsh
+	if (err) {
+		printk("lte_lc_psm_req, error: %d\n", err);
+	}
 	lte_lc_register_handler(lte_lc_event_handler);
-
+	if (lte_lc_connect() != 0) {
+		LOG_ERR("Failed to connect to LTE network");
+		return -1;
+	}
+	k_sem_take(&lte_ready, K_FOREVER);
+	
 	return 0;
 }
 
@@ -165,10 +194,10 @@ static int gnss_init_and_start(void)
 {
 #if defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
 	/* Enable GNSS. */
-	if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS) != 0) {
-		LOG_ERR("Failed to activate GNSS functional mode");
-		return -1;
-	}
+	// if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS) != 0) { //nsh
+	// 	LOG_ERR("Failed to activate GNSS functional mode");
+	// 	return -1;
+	// }
 #endif /* CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE || CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND */
 
 	/* Configure GNSS. */
@@ -243,7 +272,12 @@ static int gnss_init_and_start(void)
 		LOG_ERR("Failed to set GNSS fix interval");
 		return -1;
 	}
-
+	int err = lte_lc_psm_req(true); //nsh
+	if (err) {
+		printk("lte_lc_psm_req, error: %d\n", err);
+	}
+	else	
+		printk("psm enabled\n");
 	if (nrf_modem_gnss_start() != 0) {
 		LOG_ERR("Failed to start GNSS");
 		return -1;
@@ -370,7 +404,7 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 		LOG_ERR("Failed to stop GNSS");
 		return;
 	}
-	if(lte_connect()){
+	//if(lte_connect()){
 		printk("start server init\n");
 		err = server_init();
 		if (err) {
@@ -394,8 +428,8 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 		}
 
 		server_disconnect();
-		lte_disconnect();
-	}
+	//	lte_disconnect();
+	//}
 	if (nrf_modem_gnss_start() != 0) {
 		LOG_ERR("Failed to start GNSS");
 		return;
@@ -410,6 +444,12 @@ int main(void)
 
 	LOG_INF("Starting GNSS sample");
 
+	err = nrf_modem_at_printf("AT%%CESQ=1");
+	if (err) {
+		printk("AT+CESQ failed\n");
+		return;
+	}
+	
 	if (modem_init() != 0) {
 		LOG_ERR("Failed to initialize modem");
 		return -1;
