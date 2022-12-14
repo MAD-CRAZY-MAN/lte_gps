@@ -166,6 +166,50 @@ static void date_time_evt_handler(const struct date_time_evt *evt)
 	k_sem_give(&time_sem);
 }
 
+static void server_disconnect(void)
+{
+	(void)close(client_fd);
+}
+
+static int server_init(void)
+{
+	struct sockaddr_in *server4 = ((struct sockaddr_in *)&host_addr);
+
+	server4->sin_family = AF_INET;
+	server4->sin_port = htons(CONFIG_UDP_SERVER_PORT);
+
+	inet_pton(AF_INET, CONFIG_UDP_SERVER_ADDRESS_STATIC,
+		  &server4->sin_addr);
+
+	return 0;
+}
+
+static int server_connect(void)
+{
+	int err;
+
+	client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (client_fd < 0) {
+		printk("Failed to create UDP socket: %d\n", errno);
+		err = -errno;
+		goto error;
+	}
+
+	err = connect(client_fd, (struct sockaddr *)&host_addr,
+		      sizeof(struct sockaddr_in));
+	if (err < 0) {
+		printk("Connect failed : %d\n", errno);
+		goto error;
+	}
+
+	return 0;
+
+error:
+	server_disconnect();
+
+	return err;
+}
+
 static int modem_init(void)
 {
 	if (IS_ENABLED(CONFIG_DATE_TIME)) {
@@ -186,6 +230,20 @@ static int modem_init(void)
 		return -1;
 	}
 	k_sem_take(&lte_ready, K_FOREVER);
+
+	err = server_init();
+	if (err) {
+		printk("Not able to initialize UDP server connection\n");
+		return;
+	}
+	printk("initialize udp server\n");
+	
+	err = server_connect();
+	if (err) {
+		printk("Not able to connect to UDP server\n");
+		return;
+	}
+	printk("connected udp server\n");
 	
 	return 0;
 }
@@ -318,52 +376,6 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 	printf("Tracking: %2d Using: %2d Unhealthy: %d\n", tracked, in_fix, unhealthy);
 }
 
-
-static void server_disconnect(void)
-{
-	(void)close(client_fd);
-}
-
-static int server_init(void)
-{
-	struct sockaddr_in *server4 = ((struct sockaddr_in *)&host_addr);
-
-	server4->sin_family = AF_INET;
-	server4->sin_port = htons(CONFIG_UDP_SERVER_PORT);
-
-	inet_pton(AF_INET, CONFIG_UDP_SERVER_ADDRESS_STATIC,
-		  &server4->sin_addr);
-
-	return 0;
-}
-
-static int server_connect(void)
-{
-	int err;
-
-	client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (client_fd < 0) {
-		printk("Failed to create UDP socket: %d\n", errno);
-		err = -errno;
-		goto error;
-	}
-
-	err = connect(client_fd, (struct sockaddr *)&host_addr,
-		      sizeof(struct sockaddr_in));
-	if (err < 0) {
-		printk("Connect failed : %d\n", errno);
-		goto error;
-	}
-
-	return 0;
-
-error:
-	server_disconnect();
-
-	return err;
-}
-
-
 static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
 	int err;
@@ -405,20 +417,20 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 		return;
 	}
 	//if(lte_connect()){
-		printk("start server init\n");
-		err = server_init();
-		if (err) {
-			printk("Not able to initialize UDP server connection\n");
-			return;
-		}
-		printk("initialize udp server\n");
+		// printk("start server init\n");
+		// err = server_init();
+		// if (err) {
+		// 	printk("Not able to initialize UDP server connection\n");
+		// 	return;
+		// }
+		// printk("initialize udp server\n");
 		
-		err = server_connect();
-		if (err) {
-			printk("Not able to connect to UDP server\n");
-			return;
-		}
-		printk("connected udp server\n");
+		// err = server_connect();
+		// if (err) {
+		// 	printk("Not able to connect to UDP server\n");
+		// 	return;
+		// }
+		// printk("connected udp server\n");
 
 		printk("before send");
 		err = send(client_fd, buffer, sizeof(buffer), 0);
@@ -427,7 +439,7 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 			return;
 		}
 
-		server_disconnect();
+		// server_disconnect();
 	//	lte_disconnect();
 	//}
 	if (nrf_modem_gnss_start() != 0) {
@@ -444,12 +456,6 @@ int main(void)
 
 	LOG_INF("Starting GNSS sample");
 
-	err = nrf_modem_at_printf("AT%%CESQ=1");
-	if (err) {
-		printk("AT+CESQ failed\n");
-		return;
-	}
-	
 	if (modem_init() != 0) {
 		LOG_ERR("Failed to initialize modem");
 		return -1;
